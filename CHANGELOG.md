@@ -18,6 +18,11 @@ sense.
 
 ### Added
 
+- **testing**: CI regression check for `verify_proof`'s instruction cost
+  (`contracts/verifier/tests/cost_regression.rs`) — fails if it exceeds
+  `contracts/verifier/baseline-cost.json`'s baseline by more than 10%.
+  `make verifier-cost-check` / `make update-verifier-cost-baseline` run
+  it locally and refresh the baseline intentionally, respectively (#74).
 - **contracts**: admin-only `pause`/`unpause` on `contracts/verifier`, an
   emergency stop that makes `verify_proof`/`verify_batch` reject every
   call with `Error::ContractPaused` until unpaused, plus a public
