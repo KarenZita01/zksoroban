@@ -112,6 +112,11 @@ const VALID_PUBLIC_INPUT: [u8; 32] = [
 const WASM_PATH_HINT: &str =
     "contracts/verifier/target/wasm32v1-none/release/zksoroban_verifier.wasm";
 
+/// __constructor's vk_update_delay argument (zksoroban#46) — this test
+/// never proposes or executes a VK update, so the value doesn't affect
+/// what's being measured here; any valid u32 works.
+const VK_UPDATE_DELAY: u32 = 50;
+
 /// The 32-byte, all-`0xff`-suffixed public input `read_expiry_ledger`
 /// decodes as `expiry_ledger = u32::MAX` — i.e. "never expires" for any
 /// ledger sequence this test could plausibly set. See
@@ -204,7 +209,10 @@ fn verify_proof_instruction_cost_within_baseline() {
 
     let admin = Address::generate(&env);
     let vk = poseidon_vk(&env);
-    let contract_id = env.register(wasm.as_slice(), (admin, 1_000_000u32, 100u32, vk));
+    let contract_id = env.register(
+        wasm.as_slice(),
+        (admin, 1_000_000u32, 100u32, vk, VK_UPDATE_DELAY),
+    );
     let client = VerifierContractClient::new(&env, &contract_id);
     let caller = Address::generate(&env);
 
