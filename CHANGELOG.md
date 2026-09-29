@@ -18,6 +18,22 @@ sense.
 
 ### Added
 
+- **contracts**: timelocked verifying-key updates on `contracts/verifier`
+  — `propose_vk_update`/`execute_vk_update` replace the old immediate
+  `update_vk`, with a `vk_update_delay` (in ledgers, fixed at
+  construction) between proposing a key and it taking effect.
+  `execute_vk_update` is permissionless once the delay elapses;
+  `get_pending_vk_update()` exposes the pending change and its effective
+  ledger to anyone watching (#46).
+- **testing**: CI regression check for `verify_proof`'s instruction cost
+  (`contracts/verifier/tests/cost_regression.rs`) — fails if it exceeds
+  `contracts/verifier/baseline-cost.json`'s baseline by more than 10%.
+  `make verifier-cost-check` / `make update-verifier-cost-baseline` run
+  it locally and refresh the baseline intentionally, respectively (#74).
+- **contracts**: admin-only `pause`/`unpause` on `contracts/verifier`, an
+  emergency stop that makes `verify_proof`/`verify_batch` reject every
+  call with `Error::ContractPaused` until unpaused, plus a public
+  `is_paused()` getter (#44).
 - **contracts**: two-step admin transfer (`propose_admin`/`accept_admin`)
   and self-upgrade (`upgrade`) for `contracts/verifier` and
   `contracts/registry`, so a deployed instance's logic can be replaced
@@ -76,6 +92,11 @@ sense.
 
 ### Changed
 
+- **contracts**: `contracts/verifier`'s `update_vk` is removed —
+  replaced by the timelocked `propose_vk_update`/`execute_vk_update`
+  above. `__constructor` also gains a new required `vk_update_delay`
+  argument. Breaking for any existing integration calling `update_vk`
+  directly.
 - **demo**: migrated off the retired single-circuit verifier flow onto
   `contracts/registry`, so the demo now registers and verifies against a
   circuit ID instead of a dedicated per-circuit contract (#215).

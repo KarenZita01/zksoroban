@@ -54,6 +54,7 @@ repeat read-only requests are.
 Useful maintenance commands:
 
 - `make lint`: run Rust formatting, clippy, and TypeScript checks.
+- `make verifier-cost-check`: fail if `verify_proof`'s instruction cost regressed more than 10% — see [docs/performance.md](docs/performance.md#ci-cost-regression-check).
 - `make circuits`: compile and verify the reference Poseidon preimage circuit.
 - `make clean`: remove generated Rust, SDK, demo, and circuit build artifacts.
 
@@ -66,7 +67,7 @@ Expected result:
 - `contracts/registry/`: a multi-circuit verifying-key registry, deployed to Testnet — see [docs/architecture.md](docs/architecture.md#verifying-key-registry).
 - `contracts/verifier-interface/`: the published `VerifierClient` cross-contract interface for `contracts/verifier` — see [docs/architecture.md](docs/architecture.md#cross-contract-interface).
 - `contracts/examples/proof-gate/`: a minimal example contract calling `contracts/verifier` cross-contract via `VerifierClient`.
-- `sdk/`: a TypeScript SDK for Poseidon hashing, snarkjs proof formatting, and on-chain verification — with opt-in retry-with-backoff for transient RPC failures (see [docs/architecture.md](docs/architecture.md#retry--exponential-backoff)).
+- `sdk/`: a TypeScript SDK for Poseidon hashing, snarkjs proof formatting, and on-chain verification — with opt-in retry-with-backoff for transient RPC failures (see [docs/architecture.md](docs/architecture.md#retry--exponential-backoff)). See [sdk/README.md](sdk/README.md) for testing, including the snapshot tests that catch proof-encoding regressions.
 - `circuits/`: the reference Poseidon preimage circuit (wired to both contracts above) plus three additional circuits — `merkle_inclusion`, `range_proof`, `threshold_2of3` — registered with `contracts/registry` and tested there, but not yet on the live Testnet deployment (see docs/multi-circuit.md).
 - `demo/`: an end-to-end script that generates a fresh secret, proves knowledge of its Poseidon commitment, and verifies it on Stellar Testnet.
 - `docs/`: architecture notes, ZK primer, proof format specification, security audit checklist, and Poseidon parameter notes.
