@@ -11,7 +11,13 @@ import test from "node:test";
 import { Keypair, rpc, xdr } from "@stellar/stellar-sdk";
 
 import { verifyOnChain } from "../src/verify";
-import { SorobanZkError, SorobanZkErrorCode, VerifyOptions } from "../src/types";
+import {
+  NetworkMismatchError,
+  SorobanZkError,
+  SorobanZkErrorCode,
+  TESTNET,
+  VerifyOptions
+} from "../src/types";
 
 import * as stellarSdk from "@stellar/stellar-sdk";
 
@@ -105,8 +111,7 @@ function buildSimulationErrorStub(message: string) {
 }
 
 const DEFAULT_OPTS: VerifyOptions = {
-  rpcUrl: "http://localhost:8000",
-  contractId: "CBL6MAWJALQP25LYKUUOC34K464XPSF6BLKUW6MXZDEXEDXMQUSP7HNN",
+  network: TESTNET,
   keypair: STUB_KEYPAIR,
   calldata: {
     proofA: Buffer.alloc(64, 1),
@@ -220,12 +225,73 @@ test("verifyOnChain reports the fee from the transaction result", async () => {
   );
 });
 
+test("verifyOnChain emits submit_start then submit_done, in order, for a successful call", async () => {
+  const stages: string[] = [];
+
+  await withStubbedServer(
+    () => buildSuccessStub({}, { returnValue: xdr.ScVal.scvBool(true) }),
+    async () => {
+      await verifyOnChain({
+        ...DEFAULT_OPTS,
+        onProgress: (stage) => {
+          stages.push(stage);
+        }
+      });
+    }
+  );
+
+  assert.deepEqual(stages, ["submit_start", "submit_done"]);
+});
+
+test("verifyOnChain does not abort when onProgress itself throws", async () => {
+  await withStubbedServer(
+    () => buildSuccessStub({}, { returnValue: xdr.ScVal.scvBool(true) }),
+    async () => {
+      const result = await verifyOnChain({
+        ...DEFAULT_OPTS,
+        onProgress: () => {
+          throw new Error("boom");
+        }
+      });
+
+      assert.equal(result.verified, true);
+    }
+  );
+});
+
+test("verifyOnChain rejects a NetworkConfig whose passphrase doesn't match the RPC server's, before building a transaction", async () => {
+  const captured: { args?: xdr.ScVal[] } = {};
+
+  await withStubbedServer(
+    () => buildSuccessStub(captured, { returnValue: xdr.ScVal.scvBool(true) }),
+    async () => {
+      await assert.rejects(
+        verifyOnChain({
+          ...DEFAULT_OPTS,
+          network: { ...TESTNET, networkPassphrase: "Public Global Stellar Network ; September 2015" }
+        }),
+        (error: unknown) => {
+          assert.ok(error instanceof NetworkMismatchError);
+          assert.ok(error instanceof SorobanZkError);
+          assert.equal(error.code, SorobanZkErrorCode.NETWORK_MISMATCH);
+          assert.equal(error.expected, "Public Global Stellar Network ; September 2015");
+          assert.equal(error.actual, STUB_PASSPHRASE);
+          return true;
+        }
+      );
+    }
+  );
+
+  assert.equal(captured.args, undefined, "no transaction should be built after a network mismatch");
+});
+
 const CONTRACT_ERROR_CASES: Array<[number, SorobanZkErrorCode]> = [
   [1, SorobanZkErrorCode.CONTRACT_NOT_INITIALIZED],
   [2, SorobanZkErrorCode.RATE_LIMIT_EXCEEDED],
   [3, SorobanZkErrorCode.INVALID_WINDOW_SIZE],
   [4, SorobanZkErrorCode.PROOF_EXPIRED],
-  [5, SorobanZkErrorCode.CALLER_NOT_ALLOWED]
+  [5, SorobanZkErrorCode.CALLER_NOT_ALLOWED],
+  [11, SorobanZkErrorCode.ALREADY_USED]
 ];
 
 for (const [code, expected] of CONTRACT_ERROR_CASES) {
