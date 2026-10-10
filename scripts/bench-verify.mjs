@@ -16,14 +16,15 @@
  */
 
 import { Keypair, rpc } from "@stellar/stellar-sdk";
-import { formatProof, verifyOnChain } from "../sdk/dist/index.mjs";
+import { formatProof, verifyOnChain, TESTNET } from "../sdk/dist/index.mjs";
 import * as fs from "node:fs";
 
 const secretKey = process.env.SOROBAN_SECRET_KEY;
 const contractId = process.env.SOROBAN_VERIFIER_CONTRACT_ID;
 const n = parseInt(process.env.BENCH_N || "20", 10);
-const rpcUrl = process.env.BENCH_RPC_URL || "https://soroban-testnet.stellar.org";
+const rpcUrl = process.env.BENCH_RPC_URL || TESTNET.rpcUrl;
 const outputCsvPath = process.env.BENCH_OUTPUT_CSV || "./bench-results.csv";
+const network = { ...TESTNET, rpcUrl, contractId };
 
 if (!secretKey) {
   console.error("SOROBAN_SECRET_KEY is required");
@@ -92,8 +93,7 @@ for (let i = 0; i < n; i++) {
 
   const start = Date.now();
   const result = await verifyOnChain({
-    rpcUrl,
-    contractId,
+    network,
     keypair,
     calldata
   });
