@@ -74,22 +74,72 @@ The SDK has three responsibilities:
 - `proof.ts`: convert `snarkjs` proof JSON into the exact BN254 byte layout expected by the contract
 - `verify.ts`: build, submit, and decode the Soroban verifier transaction
 
+A fourth file, `browser.ts` (the separate `@zksoroban/sdk/browser` entry
+point — see below), generates the proof `proof.ts` then encodes:
+`generateProof` runs `snarkjs.groth16.fullProve`'s underlying WASM
+witness computation and Groth16 proving from in-memory `Uint8Array`
+bytes, with no filesystem access, so it works the same in a browser as
+in Node.
+
 Public API:
 
 - `poseidon(inputs: bigint[]): bigint`
 - `formatProof(proof, publicSignals): SorobanProofCalldata`
 - `formatVerifyingKey(vk): RegistryVerifyingKey`
+- `generateProof(secret, commitment, wasm, zkey, onProgress?): Promise<GenerateProofResult>` — `@zksoroban/sdk/browser` only (see below)
+- `serializeProof(proof, publicSignals): Uint8Array` / `deserializeProof(bytes): { proof, publicSignals }`
 - `verifyOnChain(opts): Promise<VerifyResult>` — `contracts/verifier`, signed transaction
 - `verifyViaRegistry(opts): Promise<boolean>` — `contracts/registry`, simulation-only
 - `verifyBatchOnChain(opts): Promise<VerifyBatchResult>` — `contracts/verifier`, batched, signed transaction
 - `verifyBatchViaRegistry(opts): Promise<boolean[]>` — `contracts/registry`, batched, simulation-only
 - `estimateVerifyFee(opts): Promise<EstimateVerifyFeeResult>`
 - `getContractConfig(opts): Promise<ContractConfig>`
+- `getContractVersion(network, retry?): Promise<string>`
 - `withRetry` / `RetryOptions` — opt-in exponential-backoff retries for transient RPC failures (see below)
 
 See [Batch Verification](#batch-verification) below for the two batch functions.
 
-The SDK is stateless. RPC URL, contract ID, and source keypair are passed in at call time.
+The SDK is stateless. Every RPC-touching call above takes a `network:
+NetworkConfig` (`{ rpcUrl, networkPassphrase, contractId }`) plus a
+source keypair where one's needed — see "Network Configuration" below.
+
+### Network Configuration
+
+Per [zksoroban#40](https://github.com/yusufadeagbo/zksoroban/issues/40),
+every RPC-touching SDK function takes a single `network: NetworkConfig`
+— `{ rpcUrl, networkPassphrase, contractId }` — instead of separate
+`rpcUrl`/`contractId`/`registryContractId` string parameters. `TESTNET`,
+`MAINNET`, and `LOCAL` are exported presets:
+
+```ts
+import { TESTNET, verifyOnChain } from "@zksoroban/sdk";
+
+const result = await verifyOnChain({ network: TESTNET, keypair, bundle });
+```
+
+`MAINNET` and `LOCAL` deliberately ship with an empty `rpcUrl` and/or
+`contractId` — Stellar has no single free public Mainnet Soroban RPC
+endpoint the way it does for Testnet, no `zksoroban` contract is
+deployed to Mainnet (the reference circuit's trusted setup is
+testnet-only — see `docs/security-model.md`), and a local quickstart
+deployment's contract ID is generated fresh each time, with no
+universal default. Fill in what's missing by spreading the preset:
+`{ ...LOCAL, contractId: myLocalDeployment }`.
+
+A call whose target contract lives on the same network but isn't the
+default (`contracts/registry` instead of `contracts/verifier`, say)
+overrides just `contractId` the same way:
+`{ ...TESTNET, contractId: registryContractId }`.
+
+**`networkPassphrase` isn't just documentation.** Every function that
+takes a `network` still asks the RPC server for its own passphrase
+(`getNetwork()`, exactly as before) and now also checks it against
+`network.networkPassphrase`, throwing `NetworkMismatchError` — the same
+error class `assertBundleNetwork` already used for a `ProofBundle`
+pointed at the wrong network — before building any transaction. This is
+exactly the class of mistake centralizing network config exists to
+prevent: an `rpcUrl` pointed at one network with a `contractId` left
+over from another.
 
 ### Retry & Exponential Backoff
 
@@ -101,11 +151,10 @@ connections, a node restart mid-request. Pass an optional `retry` policy
 to turn on per-request retries with exponential backoff:
 
 ```ts
-import { verifyViaRegistry } from "@zksoroban/sdk";
+import { TESTNET, verifyViaRegistry } from "@zksoroban/sdk";
 
 const verified = await verifyViaRegistry({
-  rpcUrl,
-  registryContractId,
+  network: { ...TESTNET, contractId: registryContractId },
   circuitId,
   bundle,
   retry: {
@@ -163,6 +212,43 @@ Key properties:
   requests; it never re-runs a call's own logic (calldata validation,
   result decoding, typed-error mapping all happen exactly once).
 
+### Progress Callbacks
+
+Per [zksoroban#29](https://github.com/yusufadeagbo/zksoroban/issues/29),
+`generateProof` and `verifyOnChain` both take an optional
+`onProgress: (stage: ProofStage) => void`, where `ProofStage` is:
+
+```ts
+type ProofStage =
+  | "witness_start" | "witness_done"
+  | "proof_start"   | "proof_done"
+  | "submit_start"  | "submit_done";
+```
+
+**Each function only emits the stages it actually performs** — they're
+two separate calls in this SDK, not one combined operation, and neither
+one fakes timing for work it isn't doing:
+
+- `generateProof` emits `witness_start`/`witness_done` around WASM
+  witness computation, then `proof_start`/`proof_done` around Groth16
+  proving. These are genuinely the two separate, independently-timed
+  calls `snarkjs.groth16.fullProve` makes internally
+  (`wtns.calculate` then `groth16.prove`) and normally hides behind one
+  opaque `await`; `generateProof` calls them directly itself to get real
+  hook points between them, instead of one call with a progress bar that
+  can't actually move until it's already done.
+- `verifyOnChain` emits `submit_start` right before building the
+  transaction and `submit_done` once a final result is ready to return.
+
+An application that wants all six stages, in order, calls `generateProof`
+then `verifyOnChain` with the same `onProgress` — the natural sequence
+for "generate a proof, then submit it," which is already two calls, not
+one, in this SDK.
+
+Any error `onProgress` itself throws is caught and discarded
+(`emitProofStage` in `types.ts`) — a broken progress callback must never
+abort the operation it's reporting on.
+
 ## Contract Layer
 
 The Soroban verifier contract stores no proofs or nullifiers, but it is
@@ -183,15 +269,16 @@ The contract:
 7. returns `true` or `false`
 
 The verifying key is set at construction time (`__constructor` takes a
-`VerifyingKey` argument alongside `admin`) and can be replaced later via
-`update_vk`, which requires the stored admin's auth and validates the
-new key's `ic` length matches what this circuit's public-input count
-expects. This means a circuit's verifying key can now be rotated without
-a full contract redeploy — the original motivation for this design (see
+`VerifyingKey` argument alongside `admin`) and can be replaced later —
+this means a circuit's verifying key can now be rotated without a full
+contract redeploy, the original motivation for this design (see
 [zksoroban#9](https://github.com/yusufadeagbo/zksoroban/issues/9)) — at
 the cost of a real trust-model change: see
 [`docs/security-model.md`](security-model.md)'s Trust Assumptions for
-what a compromised admin key can now do that it couldn't before.
+what a compromised admin key can now do that it couldn't before. As of
+[zksoroban#46](https://github.com/yusufadeagbo/zksoroban/issues/46),
+that replacement is timelocked rather than immediate — see "Timelocked
+Verifying-Key Updates" below.
 
 Current Testnet deployment:
 `CBL6MAWJALQP25LYKUUOC34K464XPSF6BLKUW6MXZDEXEDXMQUSP7HNN`
@@ -257,6 +344,104 @@ so an attacker cannot mint unbounded distinct commitments to grow
 storage. The counter increments only on a successful pairing check —
 failed proof attempts do not affect the count. The admin can call
 `upgrade` to redeploy from scratch if storage ever becomes a concern.
+
+### Timelocked Verifying-Key Updates
+
+Per [zksoroban#46](https://github.com/yusufadeagbo/zksoroban/issues/46),
+replacing the verifying key is no longer a single immediate call — the
+old `update_vk` is gone, replaced by a two-step propose/execute flow with
+a mandatory delay in between:
+
+1. `propose_vk_update(vk)` — requires the stored admin's auth, validates
+   `vk.ic.len()` the same way `update_vk` used to, and stores `(vk,
+   effective_ledger)` where `effective_ledger = env.ledger().sequence() +
+   vk_update_delay`. `vk_update_delay` is fixed at construction (a new
+   `__constructor` argument) — there's no way to shorten a delay already
+   in effect for a pending proposal, only for the *next* one, since the
+   delay isn't itself timelocked.
+2. `execute_vk_update()` — applies the pending proposal once
+   `env.ledger().sequence() >= effective_ledger`, `Err(TimelockNotElapsed)`
+   before that, `Err(NoPendingVkUpdate)` if nothing is proposed.
+   **Deliberately permissionless** — it takes no caller argument and
+   calls no `require_auth` at all. The thing actually being enforced is
+   the admin's own prior commitment (the delay it can't retroactively
+   shorten), not a fresh authorization; requiring the admin to also
+   execute would let a compromised key simply delay execution
+   indefinitely instead of ever completing a proposal it no longer
+   wants scrutinized, defeating the "give users time to detect and
+   react" goal outright.
+3. `get_pending_vk_update() -> Option<(VerifyingKey, u32)>` — read-only,
+   no auth, so anyone (including off-chain monitoring) can see a pending
+   change and its effective ledger before it lands. Also surfaced as
+   `get_config().timelock_delay` (the fixed delay itself, not any
+   pending proposal's specific effective ledger).
+
+A second `propose_vk_update` before the first executes replaces it
+outright — there is only ever one pending update, not a queue, and the
+delay restarts against the new proposal's ledger.
+
+Nothing else on this contract is timelocked — `set_limits`, allowlist
+management, `upgrade`, and the admin-transfer flow (see "Admin Ownership
+& Contract Upgrades" below) all still take effect immediately. Only the
+verifying key gets this treatment, because installing a malicious VK is
+the one admin action that breaks *soundness* rather than just
+availability or rate-limiting (see `docs/security-model.md`'s Trust
+Assumptions) — exactly the escalation this issue's timelock exists to
+put a visible, delayable window in front of.
+
+### Nullifier Registry
+
+Per [zksoroban#11](https://github.com/yusufadeagbo/zksoroban/issues/11),
+`verify_one` (the shared core of `verify_proof` and `verify_batch`)
+derives a nullifier from each proof and rejects one it has already
+accepted:
+
+```rust
+let nullifier = compute_nullifier(env, &item.proof_a); // sha256(proof_a)
+if env.storage().persistent().has(&DataKey::Nullifier(nullifier.clone())) {
+    return Err(Error::AlreadyUsed);
+}
+// ... byte parsing, expiry check, pairing check ...
+if verified {
+    env.storage().persistent().set(&DataKey::Nullifier(nullifier), &true);
+}
+```
+
+The check runs right after the rate-limit counter is updated and before
+`proof_a`/`proof_b`/`proof_c` are even parsed into curve points — a
+replay is rejected as cheaply as this contract can reject anything,
+well before the pairing check (the expensive part) ever runs. The
+nullifier is only *stored* on a successful verification, so a rejected
+or malformed proof never occupies storage.
+
+**Nullifier derivation is `sha256(proof_a)`, not the `Poseidon(proofA_x,
+proofA_y)` the issue names** — see `docs/security.md`'s finding #14 for
+the full reasoning (short version: Soroban has no ready-to-use Poseidon
+hash, only a low-level hazmat primitive that needs hand-supplied round
+constants, and a previous attempt at this issue was closed for calling
+an `env.poseidon()` method that doesn't exist). Per
+`docs/proof-format.md`'s G1 encoding, `proof_a`'s raw bytes already
+*are* `x || y` — the two 32-byte coordinates concatenated — so hashing
+`proof_a` directly is equivalent to hashing the two coordinates, no
+byte-splitting needed.
+
+**This is per-proof, not per-statement.** Groth16 proofs are
+randomized: a second, independently-generated proof of the exact same
+secret has different proof bytes, a different nullifier, and verifies
+successfully again. This closes "resubmit the same calldata" — the
+literal replay attack — not "prove knowledge of this secret more than
+once," which needs its own commitment-level tracking in the
+application if that stronger property is what it actually needs (a
+one-time claim or vote, for instance). See `docs/security.md`'s
+Guarantees and Non-Guarantees section for the precise boundary.
+
+`Nullifier(BytesN<32>)` entries live in **persistent** storage and are
+never cleaned up — [#11](https://github.com/yusufadeagbo/zksoroban/issues/11)'s
+own scope explicitly excludes nullifier expiry. Unlike the old
+`CallCount` bug (finding #6), an attacker cannot mint these for free:
+each one requires an actual successful pairing check against a real
+proof, submitted in a real, fee-paying transaction — the same bound
+`VerificationCount` (finding #11) already relies on.
 
 ## Events
 

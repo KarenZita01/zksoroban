@@ -37,11 +37,10 @@ transient failures with exponential backoff (see
 [docs/architecture.md](docs/architecture.md#retry--exponential-backoff)):
 
 ```ts
-import { verifyViaRegistry } from "@zksoroban/sdk";
+import { TESTNET, verifyViaRegistry } from "@zksoroban/sdk";
 
 const verified = await verifyViaRegistry({
-  rpcUrl,
-  registryContractId,
+  network: { ...TESTNET, contractId: registryContractId },
   circuitId,
   bundle,
   retry: { maxRetries: 3, baseDelayMs: 500 },
@@ -54,6 +53,7 @@ repeat read-only requests are.
 Useful maintenance commands:
 
 - `make lint`: run Rust formatting, clippy, and TypeScript checks.
+- `make verifier-cost-check`: fail if `verify_proof`'s instruction cost regressed more than 10% — see [docs/performance.md](docs/performance.md#ci-cost-regression-check).
 - `make circuits`: compile and verify the reference Poseidon preimage circuit.
 - `make clean`: remove generated Rust, SDK, demo, and circuit build artifacts.
 
@@ -66,7 +66,7 @@ Expected result:
 - `contracts/registry/`: a multi-circuit verifying-key registry, deployed to Testnet — see [docs/architecture.md](docs/architecture.md#verifying-key-registry).
 - `contracts/verifier-interface/`: the published `VerifierClient` cross-contract interface for `contracts/verifier` — see [docs/architecture.md](docs/architecture.md#cross-contract-interface).
 - `contracts/examples/proof-gate/`: a minimal example contract calling `contracts/verifier` cross-contract via `VerifierClient`.
-- `sdk/`: a TypeScript SDK for Poseidon hashing, snarkjs proof formatting, and on-chain verification — with opt-in retry-with-backoff for transient RPC failures (see [docs/architecture.md](docs/architecture.md#retry--exponential-backoff)).
+- `sdk/`: a TypeScript SDK for Poseidon hashing, snarkjs proof formatting, and on-chain verification — with opt-in retry-with-backoff for transient RPC failures (see [docs/architecture.md](docs/architecture.md#retry--exponential-backoff)). See [sdk/README.md](sdk/README.md) for testing, including the snapshot tests that catch proof-encoding regressions.
 - `circuits/`: the reference Poseidon preimage circuit (wired to both contracts above) plus three additional circuits — `merkle_inclusion`, `range_proof`, `threshold_2of3` — registered with `contracts/registry` and tested there, but not yet on the live Testnet deployment (see docs/multi-circuit.md).
 - `demo/`: an end-to-end script that generates a fresh secret, proves knowledge of its Poseidon commitment, and verifies it on Stellar Testnet.
 - `docs/`: architecture notes, ZK primer, proof format specification, security audit checklist, and Poseidon parameter notes.
@@ -123,6 +123,22 @@ Known gaps, tracked as open issues rather than left implicit:
 - Verified directly against the live deployment via `demo/`: a correct proof returns `true`, and a proof paired with the wrong public input returns `false`.
 - `contracts/verifier` (the original single-circuit contract) is still live at
   `CBL6MAWJALQP25LYKUUOC34K464XPSF6BLKUW6MXZDEXEDXMQUSP7HNN`, but predates rate-limiting, caller auth, and expiry, and is no longer what `demo/` targets.
+
+## Benchmarks
+
+Run `scripts/bench-verify.sh [N]` to submit N proofs against a Testnet
+`contracts/verifier` deployment and collect per-call fee and latency. The
+script writes `bench-results.csv` and prints a summary table (min, median,
+p95, max) to stdout.
+
+```sh
+SOROBAN_SECRET_KEY=... SOROBAN_VERIFIER_CONTRACT_ID=... \
+  ./scripts/bench-verify.sh 20
+```
+
+Requires a funded Testnet account and a deployed rate-limited
+`contracts/verifier` instance. The SDK is built automatically if `sdk/dist/`
+is missing.
 
 ## Notes
 

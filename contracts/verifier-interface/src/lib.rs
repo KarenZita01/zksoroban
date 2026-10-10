@@ -40,6 +40,9 @@ pub enum Error {
     InvalidVerifyingKey = 6,
     NoPendingAdmin = 7,
     ContractPaused = 8,
+    NoPendingVkUpdate = 9,
+    TimelockNotElapsed = 10,
+    AlreadyUsed = 11,
 }
 
 /// Cross-contract interface for a deployed `contracts/verifier` instance.

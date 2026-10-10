@@ -16,7 +16,9 @@ import { formatProof } from "./proof.js";
 import { createLogger, defaultLogger, Logger } from "./logger.js";
 import {
   ContractConfig,
+  emitProofStage,
   LogHandler,
+  NetworkConfig,
   NetworkMismatchError,
   ProofBundle,
   RetryOptions,
@@ -103,7 +105,8 @@ const CONTRACT_ERROR_CODES: Record<number, SorobanZkErrorCode> = {
   2: SorobanZkErrorCode.RATE_LIMIT_EXCEEDED,
   3: SorobanZkErrorCode.INVALID_WINDOW_SIZE,
   4: SorobanZkErrorCode.PROOF_EXPIRED,
-  5: SorobanZkErrorCode.CALLER_NOT_ALLOWED
+  5: SorobanZkErrorCode.CALLER_NOT_ALLOWED,
+  11: SorobanZkErrorCode.ALREADY_USED
 };
 
 function extractContractErrorCode(message: string): SorobanZkErrorCode | undefined {
@@ -210,6 +213,29 @@ export function assertBundleNetwork(bundle: ProofBundle, networkPassphrase: stri
   }
 }
 
+// Shared by every RPC-touching function below (zksoroban#40): build the
+// retry-wrapped rpc.Server for a NetworkConfig, and confirm the RPC server's
+// own reported passphrase actually matches what the NetworkConfig declared
+// -- exactly the class of rpcUrl/networkPassphrase/contractId mix-up
+// centralizing this config is meant to prevent, caught before a
+// transaction is ever built rather than failing less obviously downstream.
+function makeServer(network: NetworkConfig, retry?: RetryOptions) {
+  return withRetry(
+    new rpc.Server(network.rpcUrl, { allowHttp: network.rpcUrl.startsWith("http://") }),
+    retry
+  );
+}
+
+function assertNetworkPassphrase(network: NetworkConfig, actualPassphrase: string): void {
+  if (network.networkPassphrase !== actualPassphrase) {
+    throw new NetworkMismatchError(
+      network.networkPassphrase,
+      actualPassphrase,
+      "The supplied NetworkConfig declares"
+    );
+  }
+}
+
 function resolveCalldata(opts: VerifyOptions): SorobanProofCalldata {
   if (opts.calldata) {
     return opts.calldata;
@@ -233,12 +259,11 @@ export async function verifyOnChain(opts: VerifyOptions): Promise<VerifyResult> 
   logger.debug("verifyOnChain", "resolving calldata", { hasBundle: !!opts.bundle, hasCalldata: !!opts.calldata });
 
   try {
-    const server = withRetry(
-      new rpc.Server(opts.rpcUrl, { allowHttp: opts.rpcUrl.startsWith("http://") }),
-      opts.retry
-    );
+    emitProofStage(opts.onProgress, "submit_start");
+    const server = makeServer(opts.network, opts.retry);
     logger.debug("verifyOnChain", "getting network info");
     const network = await server.getNetwork();
+    assertNetworkPassphrase(opts.network, network.passphrase);
 
     if (opts.bundle) {
       assertBundleNetwork(opts.bundle, network.passphrase);
@@ -246,7 +271,7 @@ export async function verifyOnChain(opts: VerifyOptions): Promise<VerifyResult> 
 
     logger.debug("verifyOnChain", "getting account", { publicKey: opts.keypair.publicKey() });
     const account = await server.getAccount(opts.keypair.publicKey());
-    const contract = new Contract(opts.contractId);
+    const contract = new Contract(opts.network.contractId);
     const callerScVal = new Address(opts.keypair.publicKey()).toScVal();
 
     const transaction = new TransactionBuilder(account, {
@@ -327,6 +352,7 @@ export async function verifyOnChain(opts: VerifyOptions): Promise<VerifyResult> 
         verified: verifyResult.verified
       });
 
+      emitProofStage(opts.onProgress, "submit_done");
       return verifyResult;
     }
 
@@ -365,8 +391,7 @@ export async function verifyOnChain(opts: VerifyOptions): Promise<VerifyResult> 
  * @example
  * ```ts
  * const result = await verifyBatchOnChain({
- *   rpcUrl: "https://soroban-testnet.stellar.org",
- *   contractId: "CBL6MAWJALQP25LYKUUOC34K464XPSF6BLKUW6MXZDEXEDXMQUSP7HNN",
+ *   network: TESTNET,
  *   keypair,
  *   items: [
  *     { proof: proofA, publicSignals: signalsA },
@@ -394,16 +419,14 @@ export async function verifyBatchOnChain(opts: VerifyBatchOptions): Promise<Veri
   calldataItems.forEach(validateCalldata);
 
   try {
-    const server = withRetry(
-      new rpc.Server(opts.rpcUrl, { allowHttp: opts.rpcUrl.startsWith("http://") }),
-      opts.retry
-    );
+    const server = makeServer(opts.network, opts.retry);
     logger.debug("verifyBatchOnChain", "getting network info");
     const network = await server.getNetwork();
+    assertNetworkPassphrase(opts.network, network.passphrase);
 
     logger.debug("verifyBatchOnChain", "getting account", { publicKey: opts.keypair.publicKey() });
     const account = await server.getAccount(opts.keypair.publicKey());
-    const contract = new Contract(opts.contractId);
+    const contract = new Contract(opts.network.contractId);
     const callerScVal = new Address(opts.keypair.publicKey()).toScVal();
     const batchScVal = xdr.ScVal.scvVec(calldataItems.map(makeProofItemScVal));
 
@@ -525,8 +548,7 @@ export interface EstimateVerifyFeeResult {
  * @example
  * ```ts
  * const { stroops, xlm } = await estimateVerifyFee({
- *   rpcUrl: "https://soroban-testnet.stellar.org",
- *   contractId: "CBL6MAWJALQP25LYKUUOC34K464XPSF6BLKUW6MXZDEXEDXMQUSP7HNN",
+ *   network: TESTNET,
  *   keypair,
  *   bundle,
  * });
@@ -541,12 +563,10 @@ export async function estimateVerifyFee(opts: VerifyOptions): Promise<EstimateVe
   logger.debug("estimateVerifyFee", "resolving calldata", { hasBundle: !!opts.bundle, hasCalldata: !!opts.calldata });
 
   try {
-    const server = withRetry(
-      new rpc.Server(opts.rpcUrl, { allowHttp: opts.rpcUrl.startsWith("http://") }),
-      opts.retry
-    );
+    const server = makeServer(opts.network, opts.retry);
     logger.debug("estimateVerifyFee", "getting network info");
     const network = await server.getNetwork();
+    assertNetworkPassphrase(opts.network, network.passphrase);
 
     if (opts.bundle) {
       assertBundleNetwork(opts.bundle, network.passphrase);
@@ -554,7 +574,7 @@ export async function estimateVerifyFee(opts: VerifyOptions): Promise<EstimateVe
 
     logger.debug("estimateVerifyFee", "getting account", { publicKey: opts.keypair.publicKey() });
     const account = await server.getAccount(opts.keypair.publicKey());
-    const contract = new Contract(opts.contractId);
+    const contract = new Contract(opts.network.contractId);
     const callerScVal = new Address(opts.keypair.publicKey()).toScVal();
 
     const transaction = new TransactionBuilder(account, {
@@ -633,8 +653,7 @@ function resolveRegistryCalldata(opts: VerifyViaRegistryOptions): SorobanProofCa
  * @example
  * ```ts
  * const verified = await verifyViaRegistry({
- *   rpcUrl: "https://soroban-testnet.stellar.org",
- *   registryContractId: "CDTPNARKKZCZ36PL4BNKBXZTT2BLVR373S2K5NCFAOKCPPY62ESRHSXH",
+ *   network: { ...TESTNET, contractId: "CDTPNARKKZCZ36PL4BNKBXZTT2BLVR373S2K5NCFAOKCPPY62ESRHSXH" },
  *   circuitId: 2, // range_proof, once registered — see docs/multi-circuit.md
  *   bundle,
  * });
@@ -648,20 +667,16 @@ export async function verifyViaRegistry(opts: VerifyViaRegistryOptions): Promise
   logger.debug("verifyViaRegistry", "resolving calldata", { hasBundle: !!opts.bundle, hasCalldata: !!opts.calldata, circuitId: opts.circuitId });
 
   try {
-    const server = withRetry(
-      new rpc.Server(opts.rpcUrl, {
-        allowHttp: opts.rpcUrl.startsWith("http://")
-      }),
-      opts.retry
-    );
+    const server = makeServer(opts.network, opts.retry);
     logger.debug("verifyViaRegistry", "getting network info");
     const network = await server.getNetwork();
+    assertNetworkPassphrase(opts.network, network.passphrase);
 
     if (opts.bundle) {
       assertBundleNetwork(opts.bundle, network.passphrase);
     }
 
-    const contract = new Contract(opts.registryContractId);
+    const contract = new Contract(opts.network.contractId);
 
     const ephemeral = Keypair.random();
     let account: InstanceType<typeof import("@stellar/stellar-sdk").Account>;
@@ -739,8 +754,7 @@ export async function verifyViaRegistry(opts: VerifyViaRegistryOptions): Promise
  * @example
  * ```ts
  * const results = await verifyBatchViaRegistry({
- *   rpcUrl: "https://soroban-testnet.stellar.org",
- *   registryContractId: "CDTPNARKKZCZ36PL4BNKBXZTT2BLVR373S2K5NCFAOKCPPY62ESRHSXH",
+ *   network: { ...TESTNET, contractId: "CDTPNARKKZCZ36PL4BNKBXZTT2BLVR373S2K5NCFAOKCPPY62ESRHSXH" },
  *   items: [
  *     { circuitId: 1, proof: poseidonProof, publicSignals: poseidonSignals },
  *     { circuitId: 2, proof: rangeProof, publicSignals: rangeSignals },
@@ -770,16 +784,12 @@ export async function verifyBatchViaRegistry(
   calldataItems.forEach(({ calldata }) => validateCalldata(calldata));
 
   try {
-    const server = withRetry(
-      new rpc.Server(opts.rpcUrl, {
-        allowHttp: opts.rpcUrl.startsWith("http://")
-      }),
-      opts.retry
-    );
+    const server = makeServer(opts.network, opts.retry);
     logger.debug("verifyBatchViaRegistry", "getting network info");
     const network = await server.getNetwork();
+    assertNetworkPassphrase(opts.network, network.passphrase);
 
-    const contract = new Contract(opts.registryContractId);
+    const contract = new Contract(opts.network.contractId);
 
     const ephemeral = Keypair.random();
     let account: InstanceType<typeof import("@stellar/stellar-sdk").Account>;
@@ -845,10 +855,7 @@ export async function verifyBatchViaRegistry(
  * Options accepted by {@link getContractConfig}.
  */
 export interface GetContractConfigOptions {
-  /** Soroban RPC endpoint URL. */
-  rpcUrl: string;
-  /** Bech32m contract address (starts with `C`). */
-  contractId: string;
+  network: NetworkConfig;
   /**
    * Optional retry policy for transient RPC failures. Omit for the
    * previous single-attempt behavior — see {@link RetryOptions}.
@@ -870,10 +877,7 @@ export interface GetContractConfigOptions {
  *
  * @example
  * ```ts
- * const config = await getContractConfig({
- *   rpcUrl: "https://soroban-testnet.stellar.org",
- *   contractId: "CBL6MAWJALQP25LYKUUOC34K464XPSF6BLKUW6MXZDEXEDXMQUSP7HNN",
- * });
+ * const config = await getContractConfig({ network: TESTNET });
  * console.log(config.rateLimitMax, config.rateLimitWindow);
  * ```
  */
@@ -883,15 +887,11 @@ export async function getContractConfig(
   const logger: Logger = opts.logger ? createLogger("DEBUG", opts.logger) : defaultLogger;
 
   try {
-    const server = withRetry(
-      new rpc.Server(opts.rpcUrl, {
-        allowHttp: opts.rpcUrl.startsWith("http://")
-      }),
-      opts.retry
-    );
+    const server = makeServer(opts.network, opts.retry);
     logger.debug("getContractConfig", "getting network info");
     const network = await server.getNetwork();
-    const contract = new Contract(opts.contractId);
+    assertNetworkPassphrase(opts.network, network.passphrase);
+    const contract = new Contract(opts.network.contractId);
 
     // Build a transaction for simulation purposes only.  We use a throw-away
     // ephemeral keypair because no signing or fee payment happens — only

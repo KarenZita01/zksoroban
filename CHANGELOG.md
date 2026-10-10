@@ -18,6 +18,46 @@ sense.
 
 ### Added
 
+- **sdk**: optional `onProgress` progress callback on `generateProof`
+  (`@zksoroban/sdk/browser`) and `verifyOnChain`, reporting the real
+  `witness_start`/`witness_done`/`proof_start`/`proof_done` and
+  `submit_start`/`submit_done` stages each function actually performs —
+  `generateProof` now calls `snarkjs.wtns.calculate`/`groth16.prove`
+  directly (the same two calls `groth16.fullProve` makes internally)
+  instead of one opaque call, specifically to get real hook points
+  between them. A throwing `onProgress` never aborts the call it's
+  reporting on (#29).
+- **sdk**: `serializeProof`/`deserializeProof` (`sdk/src/serialize.ts`) —
+  a compact, versioned binary format for storing a raw snarkjs proof and
+  its public signals or sending them over a network, distinct from
+  `formatProof`'s Soroban-calldata encoding. Round-trips the full proof
+  shape losslessly; rejects an unrecognized version or a corrupted/
+  truncated byte array with a typed error. See
+  `docs/proof-format.md`'s "Storage/Transport Serialization" section (#33).
+- **sdk**: `NetworkConfig` type (`{ rpcUrl, networkPassphrase, contractId }`)
+  and `TESTNET`/`MAINNET`/`LOCAL` presets — see the "Changed" entry
+  below and `docs/architecture.md`'s "Network Configuration" section (#40).
+- **contracts+sdk**: per-proof replay protection on `contracts/verifier`
+  — a `Nullifier(sha256(proof_a))` stored in persistent storage on every
+  successful verification rejects a repeat of the exact same proof with
+  `Error::AlreadyUsed`, checked before the pairing check runs. A fresh,
+  independently-generated proof of the same secret still verifies
+  (Groth16 proving is randomized), so this is per-proof, not
+  per-secret — see `docs/security.md`'s Guarantees and Non-Guarantees
+  section for the exact scope. `verifyOnChain` maps the new contract
+  error to `SorobanZkErrorCode.ALREADY_USED` (#11).
+- **contracts**: timelocked verifying-key updates on `contracts/verifier`
+  — `propose_vk_update`/`execute_vk_update` replace the old immediate
+  `update_vk`, with a `vk_update_delay` (in ledgers, fixed at
+  construction) between proposing a key and it taking effect.
+  `execute_vk_update` is permissionless once the delay elapses;
+  `get_pending_vk_update()` exposes the pending change and its effective
+  ledger to anyone watching (#46).
+- **testing**: CI regression check for `verify_proof`'s instruction cost
+  (`contracts/verifier/tests/cost_regression.rs`) — fails if it exceeds
+  `contracts/verifier/baseline-cost.json`'s baseline by more than 10%.
+  `make verifier-cost-check` / `make update-verifier-cost-baseline` run
+  it locally and refresh the baseline intentionally, respectively (#74).
 - **contracts**: admin-only `pause`/`unpause` on `contracts/verifier`, an
   emergency stop that makes `verify_proof`/`verify_batch` reject every
   call with `Error::ContractPaused` until unpaused, plus a public
@@ -80,6 +120,24 @@ sense.
 
 ### Changed
 
+- **sdk, BREAKING**: every RPC-touching SDK function (`verifyOnChain`,
+  `verifyBatchOnChain`, `verifyViaRegistry`, `verifyBatchViaRegistry`,
+  `estimateVerifyFee`, `getContractConfig`, `getContractVersion`) now
+  takes a single `network: NetworkConfig` instead of separate
+  `rpcUrl`/`contractId`/`registryContractId` string parameters (or, for
+  `getContractVersion`, separate positional arguments). Also validates
+  `network.networkPassphrase` against what the RPC server itself
+  reports, throwing `NetworkMismatchError` on a mismatch — a check that
+  wasn't possible before there was a caller-declared passphrase to check
+  against. Migrate a call site by replacing its `rpcUrl`/`contractId`
+  fields with `network: TESTNET` (or another preset, spread with a
+  different `contractId` for a non-default contract on the same
+  network) (#40).
+- **contracts**: `contracts/verifier`'s `update_vk` is removed —
+  replaced by the timelocked `propose_vk_update`/`execute_vk_update`
+  above. `__constructor` also gains a new required `vk_update_delay`
+  argument. Breaking for any existing integration calling `update_vk`
+  directly.
 - **demo**: migrated off the retired single-circuit verifier flow onto
   `contracts/registry`, so the demo now registers and verifies against a
   circuit ID instead of a dedicated per-circuit contract (#215).
