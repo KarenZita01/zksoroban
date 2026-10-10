@@ -13,11 +13,10 @@ import {
 
 import { withRetry } from "./retry.js";
 import { formatProof } from "./proof.js";
-import { createLogger, defaultLogger, Logger } from "./logger.js";
+import { createLogger, defaultLogger, Logger, LogHandler } from "./logger.js";
 import {
   ContractConfig,
   emitProofStage,
-  LogHandler,
   NetworkConfig,
   NetworkMismatchError,
   ProofBundle,
@@ -295,7 +294,7 @@ export async function verifyOnChain(opts: VerifyOptions): Promise<VerifyResult> 
     const prepared = await server.prepareTransaction(transaction);
     prepared.sign(opts.keypair);
 
-    logger.info("verifyOnChain", "submitting transaction", { contractId: opts.contractId });
+    logger.info("verifyOnChain", "submitting transaction", { contractId: opts.network.contractId });
     const sendResult = await server.sendTransaction(prepared);
     if (sendResult.status !== "PENDING" && sendResult.status !== "DUPLICATE") {
       throw new SorobanZkError(
@@ -442,7 +441,7 @@ export async function verifyBatchOnChain(opts: VerifyBatchOptions): Promise<Veri
     const prepared = await server.prepareTransaction(transaction);
     prepared.sign(opts.keypair);
 
-    logger.info("verifyBatchOnChain", "submitting transaction", { contractId: opts.contractId, itemCount: opts.items.length });
+    logger.info("verifyBatchOnChain", "submitting transaction", { contractId: opts.network.contractId, itemCount: opts.items.length });
     const sendResult = await server.sendTransaction(prepared);
     if (sendResult.status !== "PENDING" && sendResult.status !== "DUPLICATE") {
       throw new SorobanZkError(
@@ -955,7 +954,7 @@ export async function getContractConfig(
       allowlistEnabled: Boolean(raw.allowlist_enabled)
     };
 
-    logger.info("getContractConfig", "config retrieved", { contractId: opts.contractId, admin: config.admin, paused: config.paused });
+    logger.info("getContractConfig", "config retrieved", { contractId: opts.network.contractId, admin: config.admin, paused: config.paused });
 
     return config;
   } catch (error) {

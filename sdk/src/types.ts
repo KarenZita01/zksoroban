@@ -1,16 +1,5 @@
 import { Keypair } from "@stellar/stellar-sdk";
-
-export type LogLevel = "DEBUG" | "INFO" | "WARN" | "ERROR";
-
-export interface LogEntry {
-  timestamp: string;
-  level: LogLevel;
-  component: string;
-  message: string;
-  data?: Record<string, unknown>;
-}
-
-export type LogHandler = (entry: LogEntry) => void;
+import type { LogHandler } from "./logger.js";
 
 /**
  * Progress stages reported during proof generation and/or on-chain
